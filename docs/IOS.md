@@ -28,8 +28,13 @@ CCU accessory advertising `com.garmin.navilite.data` is connected, otherwise the
 |-------|------|
 | Compose UI ↔ broadcast | `iosApp/iosApp/` — `RootView` hosts the Compose UI; `BroadcastBridge` triggers the (hidden) `RPSystemBroadcastPickerView` from the Start button and relays state |
 | Controller | `BroadcastMirrorController` (`iosMain`) — `start/stop` toggle the picker; `setActive` reflects the extension's state via `MirrorState.Broadcasting` |
-| Extension | `iosApp/Extension/SampleHandler.swift` — ReplayKit capture → orient-fix → 480×240 JPEG → NaviLite |
+| Extension | `iosApp/Extension/SampleHandler.swift` — ReplayKit capture → orient-fix → dash-sized JPEG → NaviLite |
 | Protocol/transport | `iosApp/Shared/` — `NaviLite.swift` (matches the Kotlin codec byte-for-byte), `EAConn` (bike), `TCPConn` (emulator), behind `DashConn` |
+
+The extension sizes its frames per-CCU: the dash rejects a JPEG that doesn't match its navigation
+viewport, and the XMAX/NMAX scooter CCU uses 480×234 where the MT-class dashes use 480×240. The size
+isn't advertised on the wire, so `handshake()` reads the CCU part number out of `AUTH_REQUEST_SEC_DATA`
+and `NaviLite.dashSize(ccuPartNumber:)` maps it (unknown CCUs fall back to 480×240).
 
 State is relayed app ⇄ extension with **Darwin notifications** (no App Group needed): the extension
 posts `app.pillion.broadcast.started/stopped`; the app maps them to `MirrorState`.
