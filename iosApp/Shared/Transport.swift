@@ -14,6 +14,19 @@ protocol DashConn: AnyObject {
     func close()
 }
 
+/// How the captured screen is cropped onto the dash panel. Mirrors the Kotlin `Framing` the app
+/// publishes to the App Group; see `sourceRect(for:)` for what the numbers mean geometrically.
+struct DashFraming: Equatable {
+    /// 100 = the largest panel-shaped rectangle the screen holds; 300 = a third of it each way.
+    var zoom = 100
+    /// Where that rectangle sits, in screen terms: -100 flush left, 0 centred, 100 flush right.
+    var offsetX = 0
+    /// The same vertically: -100 top, 0 centred, 100 bottom.
+    var offsetY = 0
+    /// Unsharp-mask strength applied after the downscale, 0–100.
+    var sharpen = 50
+}
+
 /// Where the extension streams. The bike is preferred when present; otherwise the dev emulator.
 enum BroadcastConfig {
     static let dashProtocol = "com.garmin.navilite.data"
@@ -30,14 +43,23 @@ enum BroadcastConfig {
     private static var shared: UserDefaults? { UserDefaults(suiteName: appGroup) }
 
     // Each reader falls back to a safe default if the group is unavailable (e.g. a re-signer that
-    // didn't carry the entitlement) — so the stream still works, just not slider-driven.
-    static func liveMaxFps() -> Int {
-        let v = shared?.integer(forKey: "stream.maxFps") ?? 0
-        return (5...30).contains(v) ? v : maxFps
+    // didn't carry the entitlement) — so the stream still works, just not slider-driven. `object`
+    // rather than `integer`, because 0 is a legitimate offset and must be told apart from "unset".
+    private static func int(_ key: String, _ valid: ClosedRange<Int>, or fallback: Int) -> Int {
+        guard let v = shared?.object(forKey: key) as? Int, valid.contains(v) else { return fallback }
+        return v
     }
+
+    static func liveMaxFps() -> Int { int("stream.maxFps", 5...30, or: maxFps) }
+
     /// App stores JPEG quality as 10…80; map to CoreImage's 0…1.
-    static func liveJpegQuality() -> Double {
-        let v = shared?.integer(forKey: "stream.quality") ?? 0
-        return (10...80).contains(v) ? Double(v) / 100.0 : 0.4
+    static func liveJpegQuality() -> Double { Double(int("stream.quality", 10...80, or: 40)) / 100.0 }
+
+    static func liveFraming() -> DashFraming {
+        let d = DashFraming()
+        return DashFraming(zoom: int("frame.zoom", 100...300, or: d.zoom),
+                           offsetX: int("frame.offsetX", -100...100, or: d.offsetX),
+                           offsetY: int("frame.offsetY", -100...100, or: d.offsetY),
+                           sharpen: int("frame.sharpen", 0...100, or: d.sharpen))
     }
 }

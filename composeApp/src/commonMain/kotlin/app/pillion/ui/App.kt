@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import app.pillion.core.AppInfo
 import app.pillion.core.DashSetup
 import app.pillion.core.DashResolution
+import app.pillion.core.Framing
 import app.pillion.core.MirrorController
 import app.pillion.core.MirrorSettings
 import app.pillion.core.SettingsStore
@@ -56,6 +57,7 @@ fun App(
         val state by controller.state.collectAsState()
         var quality by rememberSaveable { mutableStateOf(40) }
         var maxFps by rememberSaveable { mutableStateOf(15) }
+        var framing by remember { mutableStateOf(settingsStore?.framing() ?: Framing()) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
         var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
         var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }
@@ -82,11 +84,17 @@ fun App(
                 onClose = { showDashOnboarding = false },
             )
         } else if (showSettings) {
+            // Every knob is pushed to a live session too, so the dash reacts while the slider moves.
+            fun pushLive() =
+                controller.applyLiveSettings(MirrorSettings(quality, maxFps, dashResolution, framing))
             SettingsScreen(
                 quality = quality,
-                onQuality = { quality = it },
+                onQuality = { quality = it; pushLive() },
                 maxFps = maxFps,
-                onMaxFps = { maxFps = it },
+                onMaxFps = { maxFps = it; pushLive() },
+                framingSupported = controller.supportsFraming,
+                framing = framing,
+                onFraming = { framing = it; settingsStore?.setFraming(it); pushLive() },
                 themeMode = themeMode,
                 onThemeMode = { themeMode = it; settingsStore?.setThemeMode(it) },
                 dashSupported = dashSetup != null,
@@ -108,7 +116,7 @@ fun App(
                 state = state,
                 update = update,
                 onOpenSettings = { showSettings = true },
-                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution)) },
+                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution, framing)) },
                 onStop = controller::stop,
             )
         }
