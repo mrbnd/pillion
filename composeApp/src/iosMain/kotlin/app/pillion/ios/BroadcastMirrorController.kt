@@ -26,16 +26,35 @@ class BroadcastMirrorController : MirrorController {
     override val state: StateFlow<MirrorState> = _state.asStateFlow()
 
     override fun start(settings: MirrorSettings) {
-        // Hand the live settings to the out-of-process broadcast extension via the shared App Group
-        // (it can't read the app's own UserDefaults). The extension reads these at broadcastStarted.
-        NSUserDefaults(suiteName = APP_GROUP)?.apply {
-            setInteger(settings.maxFps.toLong(), forKey = "stream.maxFps")
-            setInteger(settings.quality.toLong(), forKey = "stream.quality")
-        }
+        publish(settings)
         onToggle?.invoke()
     }
 
     override fun stop() { onToggle?.invoke() }
+
+    /** The broadcast extension owns the capture, so it is the only thing that can crop the frame. */
+    override val supportsFraming: Boolean get() = true
+
+    /**
+     * Republish while the broadcast is running. The extension re-reads the App Group once a second,
+     * so dragging a framing slider redraws the dash instead of needing a stop/start round trip.
+     */
+    override fun applyLiveSettings(settings: MirrorSettings) = publish(settings)
+
+    /**
+     * Hand the settings to the out-of-process broadcast extension via the shared App Group — it
+     * can't read the app's own UserDefaults.
+     */
+    private fun publish(settings: MirrorSettings) {
+        NSUserDefaults(suiteName = APP_GROUP)?.apply {
+            setInteger(settings.maxFps.toLong(), forKey = "stream.maxFps")
+            setInteger(settings.quality.toLong(), forKey = "stream.quality")
+            setInteger(settings.framing.zoom.toLong(), forKey = "frame.zoom")
+            setInteger(settings.framing.offsetX.toLong(), forKey = "frame.offsetX")
+            setInteger(settings.framing.offsetY.toLong(), forKey = "frame.offsetY")
+            setInteger(settings.framing.sharpen.toLong(), forKey = "frame.sharpen")
+        }
+    }
 
     private companion object {
         const val APP_GROUP = "group.app.pillion"

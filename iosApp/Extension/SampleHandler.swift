@@ -42,19 +42,20 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var latestOrient = CGImagePropertyOrientation.up
     private var running = false
     private var seq = 1
-    // Live settings, read from the App Group at broadcastStarted (default until then).
+    // Live settings from the App Group, refreshed once a second by the sender loop (see
+    // refreshLiveSettings) so sliders can be dialled in on the bike without restarting the broadcast.
     private var sendInterval = 1.0 / Double(BroadcastConfig.maxFps)
     private var jpegQuality = 0.4
+    private var framing = DashFraming()
     // Dash viewport the frames must match, resolved from the CCU part number during the handshake.
     // Written there and read by encode() on the same sender thread, so it needs no lock.
     private var dash = NaviLite.defaultDashSize
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         running = true
-        // Pull the user's live Settings (fps / quality) from the App Group.
-        sendInterval = 1.0 / Double(BroadcastConfig.liveMaxFps())
-        jpegQuality = BroadcastConfig.liveJpegQuality()
-        extLog("PillionExt: settings — fps=\(BroadcastConfig.liveMaxFps()) quality=\(jpegQuality)")
+        refreshLiveSettings()
+        extLog("PillionExt: settings — fps=\(BroadcastConfig.liveMaxFps()) quality=\(jpegQuality) "
+             + "zoom=\(framing.zoom) offset=\(framing.offsetX),\(framing.offsetY) sharpen=\(framing.sharpen)")
         BroadcastSignal.post(BroadcastSignal.started)
         // Enumerate EVERY connected MFi accessory up front so a bike test is diagnosable even when the
         // protocol string doesn't match (otherwise we silently fall back to TCP and learn nothing about
@@ -77,6 +78,14 @@ class SampleHandler: RPBroadcastSampleHandler {
                 self.pushLoop()
             } catch { extLog("PillionExt connect err: \((error as NSError).localizedDescription)") }
         }
+    }
+
+    /// Re-read the user's settings from the App Group. Cheap, and called once a second from the
+    /// sender loop, so moving a slider in the app redraws the dash instead of needing a stop/start.
+    private func refreshLiveSettings() {
+        sendInterval = 1.0 / Double(BroadcastConfig.liveMaxFps())
+        jpegQuality = BroadcastConfig.liveJpegQuality()
+        framing = BroadcastConfig.liveFraming()
     }
 
     private func handshake() throws {
@@ -124,13 +133,20 @@ class SampleHandler: RPBroadcastSampleHandler {
         var lastSentPB: CVPixelBuffer?
         var inFlight: [Date] = []   // send timestamps of un-ACKed frames (FIFO, ≤2)
         // Applies one measured ACK time to the two-stage controller: shed JPEG quality first; once
-        // at the floor, shed detail (soft beats blocky on a map). Recover in reverse. Thresholds
-        // are wider than stop-and-wait's because a windowed ACK includes overlap with the previous
-        // frame's transmit.
+        // at the floor, shed detail (soft beats blocky on a map). Recover in reverse.
+        //
+        // The thresholds track the target pace rather than being fixed. With two frames in flight a
+        // healthy ACK lands around 2.5x the send interval, so absolute limits punished anyone who
+        // lowered the frame rate to buy bigger frames: the frame took longer to push, the ACK went
+        // over the fixed limit, and quality was pinned at the floor even on an idle link. Scaling by
+        // sendInterval reads "am I falling behind?" instead of "is this frame big?". Still capped,
+        // because past ~0.6s the lag is unusable whatever the frame rate.
         func steer(_ ackS: TimeInterval) {
-            if ackS > 0.25 {
+            let degradeAt = min(sendInterval * 3.75, 0.60)
+            let recoverAt = min(sendInterval * 2.10, 0.34)
+            if ackS > degradeAt {
                 if q > 0.12 { q = max(0.12, q - 0.05) } else { detail = 0.6 }
-            } else if ackS < 0.14 {
+            } else if ackS < recoverAt {
                 if detail < 1.0 { detail = 1.0 } else { q = min(jpegQuality, q + 0.02) }
             }
             acks += 1
@@ -149,7 +165,9 @@ class SampleHandler: RPBroadcastSampleHandler {
             guard let jpg = encode(pb, o, quality: q, detail: detail) else { continue }
             // Window gate: block only when 2 frames are already un-ACKed.
             while running && inFlight.count >= 2 {
-                if awaitAck(1.0) {
+                // Scale the stall timeout with the pace too: at 5 fps a legitimately large frame
+                // pair can outlast a flat one-second wait, and a false timeout resets the window.
+                if awaitAck(max(1.0, sendInterval * 8)) {
                     steer(Date().timeIntervalSince(inFlight.removeFirst()))
                 } else {
                     // Timeout: dash silent or ACK lost. Drain any stragglers and reset the window
@@ -170,6 +188,9 @@ class SampleHandler: RPBroadcastSampleHandler {
                 extLog(String(format: "PillionExt: FPS %.1f  %dKB  ack %.0fms  q%.2f d%.1f",
                               Double(acks) / dt, jpg.count / 1024, ackTotal / Double(max(acks, 1)) * 1000, q, detail))
                 acks = 0; ackTotal = 0; t0 = Date()
+                // Pick up slider moves mid-session. The ceiling may have dropped, so pull q under it.
+                refreshLiveSettings()
+                q = min(q, jpegQuality)
             }
         }
     }
@@ -192,35 +213,65 @@ class SampleHandler: RPBroadcastSampleHandler {
         lock.lock(); latestPixels = pb; latestOrient = fix; lock.unlock()
     }
 
-    /// Downscale + letterbox to the dash panel and JPEG-encode. Runs on the sender thread once per
-    /// sent frame. Broadcast extensions are killed past ~50 MB, so each encode gets its own pool.
+    /// The rectangle of the captured screen that gets shown on the panel.
+    ///
+    /// At zoom 100 it's the largest panel-shaped rectangle the screen holds, so the panel is filled
+    /// edge to edge. That alone rescues a portrait phone, which used to aspect-fit down to a ~110px
+    /// strip marooned in black; now it's a full-width band of the screen. Zooming shrinks the
+    /// rectangle and the offsets slide it over the slack that leaves — enough to push a nav app's
+    /// turn card and button column off the panel and put the rider's marker in the middle.
+    private func sourceRect(for e: CGRect) -> CGRect {
+        let aspect = dash.width / dash.height
+        var w = e.width, h = e.height
+        if w / h > aspect { w = h * aspect } else { h = w / aspect }
+        let zoom = max(1.0, CGFloat(framing.zoom) / 100.0)
+        w /= zoom; h /= zoom
+        // Offsets are a fraction of the leftover slack, so no setting can push the crop off-screen.
+        let fx = 0.5 + CGFloat(framing.offsetX) / 200.0
+        // CoreImage's y axis points up while the slider reads in screen terms, so "down" is smaller.
+        let fy = 0.5 - CGFloat(framing.offsetY) / 200.0
+        return CGRect(x: e.origin.x + (e.width - w) * fx,
+                      y: e.origin.y + (e.height - h) * fy,
+                      width: w, height: h)
+    }
+
+    /// Crop to the framing rectangle, scale it onto the dash panel and JPEG-encode. Runs on the
+    /// sender thread once per sent frame. Broadcast extensions are killed past ~50 MB, so each
+    /// encode gets its own pool.
     private func encode(_ pb: CVPixelBuffer, _ orient: CGImagePropertyOrientation,
                         quality: Double, detail: CGFloat = 1.0) -> [UInt8]? {
         autoreleasepool {
             let img = CIImage(cvPixelBuffer: pb).oriented(orient)
-            let e = img.extent
-            // Aspect-FIT (letterbox): whole screen centred on the dash panel with black bars.
-            let scale = min(dash.width / e.width, dash.height / e.height)
-            let s = img.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let se = s.extent
-            let tx = (dash.width - se.width) / 2 - se.origin.x
-            let ty = (dash.height - se.height) / 2 - se.origin.y
-            let centered = s.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+            let src = sourceRect(for: img.extent)
+            guard src.width > 1, src.height > 1 else { return nil }   // degenerate frame: skip it
+            let scale = dash.width / src.width
             let canvas = CGRect(origin: .zero, size: dash)
-            var cropped = centered.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
+            let placed = img
+                .transformed(by: CGAffineTransform(translationX: -src.origin.x, y: -src.origin.y))
+                .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            // Black underneath, so a rounding sliver at an edge reads as black, not transparent.
+            var out = placed.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
             if detail < 1.0 {
                 // Soften via Lanczos down + up on the final panel-sized frame: kills the
                 // high-frequency map detail that dominates JPEG size (~detail² smaller frames).
-                cropped = cropped
+                out = out
                     .applyingFilter("CILanczosScaleTransform",
                                     parameters: [kCIInputScaleKey: detail, kCIInputAspectRatioKey: 1.0])
                     .applyingFilter("CILanczosScaleTransform",
                                     parameters: [kCIInputScaleKey: 1.0 / detail, kCIInputAspectRatioKey: 1.0])
                     .cropped(to: canvas)
+            } else if framing.sharpen > 0 {
+                // A phone screen shrunk several times over turns street labels to mush; sharpening
+                // the finished panel image wins that back. Skipped while softening, the opposite trade.
+                out = out.clampedToExtent()
+                    .applyingFilter("CIUnsharpMask",
+                                    parameters: [kCIInputRadiusKey: 1.0,
+                                                 kCIInputIntensityKey: Double(framing.sharpen) / 100.0])
+                    .cropped(to: canvas)
             }
             let opts: [CIImageRepresentationOption: Any] =
                 [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality]
-            guard let data = ci.jpegRepresentation(of: cropped, colorSpace: CGColorSpaceCreateDeviceRGB(), options: opts) else { return nil }
+            guard let data = ci.jpegRepresentation(of: out, colorSpace: CGColorSpaceCreateDeviceRGB(), options: opts) else { return nil }
             return [UInt8](data)
         }
     }

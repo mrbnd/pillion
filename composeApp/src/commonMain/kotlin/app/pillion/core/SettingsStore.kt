@@ -16,6 +16,10 @@ interface SettingsStore {
     fun dashResolution(): DashResolution
     fun setDashResolution(resolution: DashResolution)
 
+    /** How the captured screen is cropped onto the dash panel. Dialled in once, so it must persist. */
+    fun framing(): Framing
+    fun setFraming(framing: Framing)
+
     /** The head-unit the user picked at onboarding ([app.pillion.core.headunit.HeadUnitProfile.id]),
      *  or null if they haven't chosen yet (→ show the bike-selection screen). */
     fun selectedBikeId(): String?

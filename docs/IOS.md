@@ -36,6 +36,21 @@ viewport, and the XMAX/NMAX scooter CCU uses 480×234 where the MT-class dashes 
 isn't advertised on the wire, so `handshake()` reads the CCU part number out of `AUTH_REQUEST_SEC_DATA`
 and `NaviLite.dashSize(ccuPartNumber:)` maps it (unknown CCUs fall back to 480×240).
 
+### Framing
+
+The panel is a ~2:1 letterbox and no nav app is laid out for it: the turn card, ETA sheet and button
+column sit around the edges, and the rider's marker is rarely centred. So the extension doesn't fit
+the whole screen onto the panel — it crops a **source rectangle** and scales that. At zoom 100 the
+rectangle is the largest panel-shaped one the screen holds (a portrait phone therefore gives a
+full-width band instead of the ~110px strip aspect-fit used to produce); zooming shrinks it and the
+two offsets slide it over the slack. There's also an unsharp-mask strength, because shrinking a phone
+screen onto 480px turns street labels to mush.
+
+All four live in Settings ▸ **Dash framing** (iOS only — see `MirrorController.supportsFraming`; the
+Android paths capture at dash size already). The app republishes them to the App Group on every
+slider move and the extension re-reads once a second, so the dash follows the slider live rather than
+needing a stop/start per nudge. The same refresh picks up quality and frame-rate changes.
+
 State is relayed app ⇄ extension with **Darwin notifications** (no App Group needed): the extension
 posts `app.pillion.broadcast.started/stopped`; the app maps them to `MirrorState`.
 

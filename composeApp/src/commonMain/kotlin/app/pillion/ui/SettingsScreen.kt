@@ -53,10 +53,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pillion.core.AppInfo
 import app.pillion.core.DashResolution
+import app.pillion.core.Framing
 import app.pillion.core.ThemeMode
 import app.pillion.core.UpdateInfo
 import app.pillion.resources.Res
 import app.pillion.resources.app_icon
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import org.jetbrains.compose.resources.painterResource
 
@@ -67,6 +69,9 @@ internal fun SettingsScreen(
     onQuality: (Int) -> Unit,
     maxFps: Int,
     onMaxFps: (Int) -> Unit,
+    framingSupported: Boolean = false,
+    framing: Framing = Framing(),
+    onFraming: (Framing) -> Unit = {},
     themeMode: ThemeMode,
     onThemeMode: (ThemeMode) -> Unit,
     dashSupported: Boolean = false,
@@ -198,6 +203,44 @@ internal fun SettingsScreen(
             modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
         )
 
+        if (framingSupported) {
+            Spacer(Modifier.height(24.dp))
+            SectionHeader("Dash framing")
+            SettingsGroup {
+                SettingSlider(
+                    "Zoom", zoomLabel(framing.zoom),
+                    framing.zoom.toFloat(), 100f, 300f,
+                ) { onFraming(framing.copy(zoom = it.roundToInt())) }
+                GroupDivider()
+                SettingSlider(
+                    "Horizontal", offsetLabel(framing.offsetX, "left", "right"),
+                    framing.offsetX.toFloat(), -100f, 100f,
+                ) { onFraming(framing.copy(offsetX = it.roundToInt())) }
+                GroupDivider()
+                SettingSlider(
+                    "Vertical", offsetLabel(framing.offsetY, "up", "down"),
+                    framing.offsetY.toFloat(), -100f, 100f,
+                ) { onFraming(framing.copy(offsetY = it.roundToInt())) }
+                GroupDivider()
+                SettingSlider(
+                    "Sharpness", "${framing.sharpen}",
+                    framing.sharpen.toFloat(), 0f, 100f,
+                ) { onFraming(framing.copy(sharpen = it.roundToInt())) }
+                GroupDivider()
+                TextButton(onClick = { onFraming(Framing()) }, modifier = Modifier.padding(vertical = 2.dp)) {
+                    Text("Reset framing", fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Text(
+                "Nav apps park their turn card and buttons around the edge of the screen, and rarely " +
+                    "put you in the middle. Zoom in and slide until the dash shows the map you want. " +
+                    "Adjust it while mirroring — the dash follows every change.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
+            )
+        }
+
         if (dashSupported) {
             Spacer(Modifier.height(24.dp))
             SectionHeader("Dedicated dash display (experimental)")
@@ -286,6 +329,19 @@ private fun GroupDivider() {
         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
         modifier = Modifier.padding(vertical = 2.dp),
     )
+}
+
+/** 100 → "1.0× (full screen)", 250 → "2.5×". */
+private fun zoomLabel(zoom: Int): String {
+    val text = "${zoom / 100}.${(zoom % 100) / 10}×"
+    return if (zoom <= 100) "$text (full screen)" else text
+}
+
+/** -100 → "100% left", 0 → "centred", 100 → "100% right". */
+private fun offsetLabel(offset: Int, negative: String, positive: String): String = when {
+    offset == 0 -> "centred"
+    offset < 0 -> "${abs(offset)}% $negative"
+    else -> "$offset% $positive"
 }
 
 @Composable
